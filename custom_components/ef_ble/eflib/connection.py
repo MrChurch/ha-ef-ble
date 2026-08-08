@@ -57,6 +57,10 @@ MAX_CONNECTION_ATTEMPTS = 10
 # long enough for HA to mark the entry `FAILED_UNLOAD`, so cap every disconnect.
 DISCONNECT_TIMEOUT = 5.0
 
+# Keep reconnect diagnostics aggregated so an unavailable device does not create
+# one persistent log entry per retry.
+RECONNECT_DIAGNOSTIC_INTERVAL = 15 * 60
+
 
 _BT_PROTOCOL_UUIDS = {
     "rfcomm": {
@@ -271,6 +275,10 @@ class Connection:
         self._connection_attempt: int = 0
         self._reconnect_attempt: int = 0
         self._reconnect = True
+        self._reconnect_cycle_started: float | None = None
+        self._reconnect_cycle_attempts = 0
+        self._reconnect_cycle_failures = 0
+        self._reconnect_last_summary = 0.0
 
         self._connection_state: ConnectionState = None  # pyright: ignore[reportAttributeAccessIssue]
         self._state_reason: str | None = None
@@ -465,6 +473,12 @@ class Connection:
         if self._reconnect_task is not None:
             return
 
+        self._reconnect_cycle_started = time.monotonic()
+        self._reconnect_cycle_attempts = 0
+        self._reconnect_cycle_failures = 0
+        self._reconnect_last_summary = 0.0
+        self._logger.info("BLE reconnect cycle started; trigger=%s", trigger)
+
         loop = asyncio.get_running_loop()
         self._reconnect_task = self._add_task(self.reconnect(), loop)
 
@@ -493,15 +507,46 @@ class Connection:
         jitter = (device_hash / 0xFFFFFFFF) * self._options.reconnect_jitter
         return delay * (1 + jitter)
 
+    def _log_reconnect_summary(
+        self, *, force: bool = False, outcome: str | None = None
+    ) -> None:
+        """Log a low-volume summary of the current reconnect cycle."""
+        if self._reconnect_cycle_started is None:
+            self._reconnect_cycle_started = time.monotonic()
+
+        now = time.monotonic()
+        if (
+            not force
+            and self._reconnect_last_summary
+            and now - self._reconnect_last_summary < RECONNECT_DIAGNOSTIC_INTERVAL
+        ):
+            return
+
+        elapsed = now - self._reconnect_cycle_started
+        last_error = (
+            type(self._last_exception).__name__ if self._last_exception else "none"
+        )
+        outcome_text = f", outcome={outcome}" if outcome else ""
+        self._logger.info(
+            "BLE reconnect summary: attempts=%d, failures=%d, elapsed=%.0fs, "
+            "state=%s, last_error=%s%s",
+            self._reconnect_cycle_attempts,
+            self._reconnect_cycle_failures,
+            elapsed,
+            self._state,
+            last_error,
+            outcome_text,
+        )
+        self._reconnect_last_summary = now
+
     async def reconnect(self) -> None:
         """Reconnect until the link is restored or the configured limit is reached."""
         while self._retry_on_disconnect:
             self._reconnect_attempt += 1
+            self._reconnect_cycle_attempts += 1
             max_attempts = self._options.max_reconnect_attempts
             if max_attempts != 0 and self._reconnect_attempt > max_attempts:
-                self._logger.error(
-                    "Could not reconnect after %d attempts", max_attempts
-                )
+                self._reconnect_cycle_failures += 1
                 self._retry_on_disconnect = False
                 self._set_state(
                     ConnectionState.ERROR_MAX_RECONNECT_ATTEMPTS_REACHED,
@@ -510,20 +555,24 @@ class Connection:
                         last_error=self._last_exception,
                     ),
                 )
+                self._log_reconnect_summary(
+                    force=True, outcome="max_attempts_reached"
+                )
                 self._reconnect_attempt = 0
                 return
 
             delay = self._reconnect_delay()
             attempt_limit = str(max_attempts) if max_attempts else "unlimited"
-            self._logger.warning(
+            self._logger.debug(
                 "Reconnecting to the device in %.1f seconds, attempt: %d/%s...",
                 delay,
                 self._reconnect_attempt,
                 attempt_limit,
             )
+            self._log_reconnect_summary()
             await asyncio.sleep(delay)
             if not self._retry_on_disconnect:
-                self._logger.warning("Reconnect is aborted")
+                self._log_reconnect_summary(force=True, outcome="aborted")
                 return
 
             self._set_state(ConnectionState.RECONNECTING)
@@ -532,22 +581,30 @@ class Connection:
             except AuthErrors.BaseException as e:
                 # Authentication errors are configuration/device-state errors, not
                 # transport errors.  Retrying them forever only creates a BLE storm.
+                self._reconnect_cycle_failures += 1
                 self._retry_on_disconnect = False
                 self._set_state(ConnectionState.ERROR_AUTH_FAILED, e)
+                self._log_reconnect_summary(force=True, outcome="auth_failed")
                 return
             except Exception as e:  # noqa: BLE001
                 # Keep the native reconnect loop alive for transient auth/transport
                 # exceptions that happen before `connect()` can classify the error.
+                self._reconnect_cycle_failures += 1
                 self._last_exception = e
-                self._logger.warning("Reconnect attempt failed: %s", e)
+                self._logger.debug(
+                    "Reconnect attempt failed: %s", type(e).__name__
+                )
                 continue
 
             state = await self.wait_until_authenticated_or_error()
             if state.authenticated:
+                self._log_reconnect_summary(force=True, outcome="restored")
                 return
             if state is ConnectionState.ERROR_AUTH_FAILED:
+                self._reconnect_cycle_failures += 1
                 self._retry_on_disconnect = False
                 self._notify_disconnect(self._state_exception)
+                self._log_reconnect_summary(force=True, outcome="auth_failed")
                 return
 
     async def _disconnect_client(self) -> None:

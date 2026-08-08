@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -39,6 +40,23 @@ def test_reconnect_delay_is_stable_but_separates_devices(mocker):
     assert first._reconnect_delay() != second._reconnect_delay()
     assert 5 <= first._reconnect_delay() <= 6.25
     assert 5 <= second._reconnect_delay() <= 6.25
+
+
+def test_reconnect_diagnostics_are_rate_limited(mocker, caplog):
+    connection = _connection(mocker)
+    connection._reconnect_cycle_started = 0
+    connection._reconnect_cycle_attempts = 2
+    connection._reconnect_cycle_failures = 1
+
+    with caplog.at_level(logging.INFO):
+        connection._log_reconnect_summary()
+        connection._log_reconnect_summary()
+        connection._log_reconnect_summary(force=True, outcome="restored")
+
+    messages = [record.message for record in caplog.records]
+    assert len(messages) == 2
+    assert "attempts=2, failures=1" in messages[0]
+    assert "outcome=restored" in messages[1]
 
 
 @pytest.mark.asyncio
