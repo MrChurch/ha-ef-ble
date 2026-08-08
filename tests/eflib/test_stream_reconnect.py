@@ -59,6 +59,22 @@ def test_reconnect_diagnostics_are_rate_limited(mocker, caplog):
     assert "outcome=restored" in messages[1]
 
 
+def test_frame_assembler_is_reset_between_sessions(mocker):
+    connection = _connection(mocker)
+    first_key = mocker.Mock()
+    second_key = mocker.Mock()
+    connection._encryption = first_key
+
+    first = connection._frame_assembler
+    connection._encryption = second_key
+    connection._reset_frame_assembler()
+    second = connection._frame_assembler
+
+    assert first is not second
+    assert first._encryption is first_key
+    assert second._encryption is second_key
+
+
 @pytest.mark.asyncio
 async def test_reconnect_retries_failed_rebuild_until_authenticated(mocker):
     connection = _connection(mocker)

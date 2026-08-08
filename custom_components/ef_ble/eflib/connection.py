@@ -1050,6 +1050,10 @@ class Connection:
         self._add_task(self.sendPacket(reply_packet))
 
     async def initBleSessionKey(self):
+        # A reconnect creates a new session key.  The cached assembler keeps a
+        # reference to the previous encryption object, so it must not survive
+        # across BLE sessions or auth replies can be decrypted into garbage.
+        self._reset_frame_assembler()
         match self._encrypt_type:
             case 0:
                 await self._type_0_session()
@@ -1326,6 +1330,10 @@ class Connection:
                 return EncPacketAssembler(self._encryption)
             case _:
                 raise ValueError(f"Unsupported encryption type: {self._encrypt_type}")
+
+    def _reset_frame_assembler(self) -> None:
+        """Drop the assembler cached for the previous encrypted BLE session."""
+        self.__dict__.pop("_frame_assembler", None)
 
     @cached_property
     def _frame_assembler(self):
