@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from unittest.mock import AsyncMock
 
@@ -109,6 +110,44 @@ async def test_reconnect_retries_failed_rebuild_until_authenticated(mocker):
 
     assert connect_calls == 3
     assert sleep.await_count == 3
+    assert connection._state is ConnectionState.AUTHENTICATED
+
+
+@pytest.mark.asyncio
+async def test_disconnect_during_authentication_restarts_active_reconnect(mocker):
+    connection = _connection(mocker)
+    connection.with_options(
+        Connection.Options(
+            max_reconnect_attempts=2,
+            reconnect_delay=0,
+            reconnect_delay_max=0,
+        )
+    )
+    connection._retry_on_disconnect = True
+    sleep = mocker.patch(
+        "custom_components.ef_ble.eflib.connection.asyncio.sleep",
+        new_callable=AsyncMock,
+    )
+    connect_calls = 0
+
+    async def connect():
+        nonlocal connect_calls
+        connect_calls += 1
+        connection._connected.clear()
+        connection._disconnected.clear()
+        if connect_calls == 1:
+            connection._set_state(ConnectionState.AUTHENTICATING)
+            connection.disconnected()
+        else:
+            connection._set_state(ConnectionState.AUTHENTICATED)
+
+    connection.connect = connect
+    connection._reconnect_task = asyncio.current_task()
+
+    await connection.reconnect()
+
+    assert connect_calls == 2
+    assert sleep.await_count == 2
     assert connection._state is ConnectionState.AUTHENTICATED
 
 

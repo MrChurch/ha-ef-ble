@@ -471,6 +471,14 @@ class Connection:
             return
 
         if self._reconnect_task is not None:
+            # The reconnect task may already be waiting for authentication when
+            # the transport drops during the auth handshake.  Do not just return
+            # here: wait_until_authenticated_or_error() would otherwise wait
+            # forever because the disconnect callback is the only state change
+            # signal available for that in-flight attempt.
+            self._connected.set()
+            self._disconnected.set()
+            self._set_state(ConnectionState.DISCONNECTED, reason=trigger)
             return
 
         self._reconnect_cycle_started = time.monotonic()
@@ -597,7 +605,10 @@ class Connection:
                 continue
 
             state = await self.wait_until_authenticated_or_error()
-            if state.authenticated:
+            # A disconnect can race with the state transition to AUTHENTICATED.
+            # In that case the waiter may already have returned successfully,
+            # but the transport is gone and this cycle must continue.
+            if state.authenticated and not self._disconnected.is_set():
                 self._log_reconnect_summary(force=True, outcome="restored")
                 return
             if state is ConnectionState.ERROR_AUTH_FAILED:
