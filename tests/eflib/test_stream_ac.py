@@ -1,6 +1,7 @@
 import pytest
 
 from custom_components.ef_ble.eflib.devices.stream_ac import Device
+from custom_components.ef_ble.eflib.exceptions import NotConnectedError
 from custom_components.ef_ble.eflib.packet import Packet
 from custom_components.ef_ble.eflib.pb import bk_series_pb2
 
@@ -51,3 +52,35 @@ async def test_stream_processes_display_property_upload(device):
 
     assert await device.data_parse(packet) is True
     assert device.battery_level == 73.5
+
+
+@pytest.mark.asyncio
+async def test_stream_timer_mod_is_removed_when_send_fails(device, mocker):
+    task = bk_series_pb2.TimerTask(
+        task_index=1,
+        is_enable=False,
+        home_need_power_limited=600,
+    )
+    device.update_from_message(
+        bk_series_pb2.DisplayPropertyUpload(
+            all_timer_task=bk_series_pb2.AllTimerTask(time_task=[task])
+        )
+    )
+    device._send_config_packet = mocker.AsyncMock(
+        side_effect=NotConnectedError("device is not connected")
+    )
+
+    with pytest.raises(NotConnectedError):
+        await device._send_timer_task_packet(
+            task, lambda timer: setattr(timer, "is_enable", True)
+        )
+
+    assert device._get_chain().pending_mods == []
+
+
+@pytest.mark.asyncio
+async def test_stream_config_write_fails_loudly_when_disconnected(device):
+    device._conn = None
+
+    with pytest.raises(NotConnectedError):
+        await device._send_config_packet(bk_series_pb2.ConfigWrite(cfg_max_chg_soc=90))

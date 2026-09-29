@@ -20,6 +20,7 @@ class EcoflowEntity(Entity):
         self._device = device
         self._update_callbacks: list[tuple[str, Callable[[Any], None]]] = []
         self._write_state_props: list[str] = []
+        self._remove_connection_state_listener: Callable[[], None] | None = None
 
     @property
     def device_info(self):
@@ -85,6 +86,9 @@ class EcoflowEntity(Entity):
         self._update_callbacks.append((prop_name, state_updated))
 
     async def async_added_to_hass(self) -> None:
+        self._remove_connection_state_listener = self._device.on_connection_state_change(
+            self._on_connection_state_change
+        )
         for prop, state_callback in self._update_callbacks:
             self._device.register_state_update_callback(state_callback, prop)
         for prop in self._write_state_props:
@@ -92,11 +96,19 @@ class EcoflowEntity(Entity):
         await super().async_added_to_hass()
 
     async def async_will_remove_from_hass(self) -> None:
+        if self._remove_connection_state_listener is not None:
+            self._remove_connection_state_listener()
+            self._remove_connection_state_listener = None
         for prop, state_callback in self._update_callbacks:
             self._device.remove_state_update_callback(state_callback, prop)
         for prop in self._write_state_props:
             self._device.remove_callback(self.async_write_ha_state, prop)
         await super().async_will_remove_from_hass()
+
+    @callback
+    def _on_connection_state_change(self, _state: Any) -> None:
+        """Refresh HA availability when the BLE connection state changes."""
+        self.async_write_ha_state()
 
 
 class EcoflowBatteryAddonEntity(EcoflowEntity):

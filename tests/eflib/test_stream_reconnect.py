@@ -152,6 +152,40 @@ async def test_disconnect_during_authentication_restarts_active_reconnect(mocker
 
 
 @pytest.mark.asyncio
+async def test_disconnect_marks_connection_unavailable_while_reconnecting(mocker):
+    connection = _connection(mocker)
+    connection._retry_on_disconnect = True
+    connection._set_state(ConnectionState.AUTHENTICATED)
+    connection.reconnect = AsyncMock()
+
+    connection.disconnected()
+    reconnect_task = connection._reconnect_task
+    assert connection._state is ConnectionState.DISCONNECTED
+    assert reconnect_task is not None
+    await reconnect_task
+
+
+@pytest.mark.asyncio
+async def test_reconnect_stops_on_unexpected_exception(mocker):
+    connection = _connection(mocker)
+    connection.with_options(
+        Connection.Options(
+            max_reconnect_attempts=0,
+            reconnect_delay=0,
+            reconnect_delay_max=0,
+        )
+    )
+    connection._retry_on_disconnect = True
+    connection.connect = AsyncMock(side_effect=RuntimeError("unexpected bug"))
+
+    with pytest.raises(RuntimeError, match="unexpected bug"):
+        await connection.reconnect()
+
+    connection.connect.assert_awaited_once()
+    assert connection._state is ConnectionState.RECONNECTING
+
+
+@pytest.mark.asyncio
 async def test_connect_is_allowed_from_reconnecting_state(mocker):
     connection = _connection(mocker)
     client = mocker.Mock(is_connected=True)
