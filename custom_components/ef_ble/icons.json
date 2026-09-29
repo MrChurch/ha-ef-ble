@@ -3,6 +3,9 @@
     "button": {
       "power_off": {
         "default": "mdi:power"
+      },
+      "reinitialize_discharging": {
+        "default": "mdi:refresh"
       }
     },
     "binary_sensor": {

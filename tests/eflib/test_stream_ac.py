@@ -84,3 +84,60 @@ async def test_stream_config_write_fails_loudly_when_disconnected(device):
 
     with pytest.raises(NotConnectedError):
         await device._send_config_packet(bk_series_pb2.ConfigWrite(cfg_max_chg_soc=90))
+
+
+@pytest.mark.asyncio
+async def test_reinitialize_discharging_pulses_task_and_refreshes_telemetry(device, mocker):
+    task = bk_series_pb2.TimerTask(
+        task_index=2,
+        is_enable=True,
+        home_need_power_limited=800,
+    )
+    device.update_from_message(
+        bk_series_pb2.DisplayPropertyUpload(
+            all_timer_task=bk_series_pb2.AllTimerTask(time_task=[task])
+        )
+    )
+    sleep = mocker.patch(
+        "custom_components.ef_ble.eflib.devices.stream_ac.asyncio.sleep",
+        new=mocker.AsyncMock(),
+    )
+
+    await device.reinitialize_discharging()
+
+    packets = device._conn.sendPacket.await_args_list
+    assert len(packets) == 3
+    states = []
+    for call in packets[:2]:
+        config = bk_series_pb2.ConfigWrite()
+        config.ParseFromString(call.args[0].payload)
+        states.append(config.cfg_all_timer_task.time_task[0])
+    assert [state.is_enable for state in states] == [False, True]
+    assert all(state.home_need_power_limited == 800 for state in states)
+    config = bk_series_pb2.ConfigWrite()
+    config.ParseFromString(packets[2].args[0].payload)
+    assert config.active_display_property_full_upload is True
+    sleep.assert_awaited_once_with(1.0)
+
+
+@pytest.mark.asyncio
+async def test_reinitialize_discharging_is_throttled(device, mocker):
+    task = bk_series_pb2.TimerTask(
+        task_index=2,
+        is_enable=True,
+        home_need_power_limited=800,
+    )
+    device.update_from_message(
+        bk_series_pb2.DisplayPropertyUpload(
+            all_timer_task=bk_series_pb2.AllTimerTask(time_task=[task])
+        )
+    )
+    mocker.patch(
+        "custom_components.ef_ble.eflib.devices.stream_ac.asyncio.sleep",
+        new=mocker.AsyncMock(),
+    )
+
+    await device.reinitialize_discharging()
+    await device.reinitialize_discharging()
+
+    assert device._conn.sendPacket.await_count == 3

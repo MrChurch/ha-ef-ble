@@ -139,6 +139,7 @@ class Device(DeviceBase, ProtobufProps):
     SN_PREFIX = (b"BK51",)
     NAME_PREFIX = "EF-6"
     _PROPERTY_UPLOAD_REFRESH_INTERVAL = 300.0
+    _DISCHARGE_REINITIALIZE_COOLDOWN = 30.0
 
     @property
     def uses_native_reconnect(self) -> bool:
@@ -196,6 +197,7 @@ class Device(DeviceBase, ProtobufProps):
     ) -> None:
         super().__init__(ble_dev, adv_data, sn)
         self._timer_task_chain: _TimerTaskChain | None = None
+        self._last_discharge_reinitialize = 0.0
         self.add_timer_task(
             self._enable_property_upload,
             interval=self._PROPERTY_UPLOAD_REFRESH_INTERVAL,
@@ -492,6 +494,60 @@ class Device(DeviceBase, ProtobufProps):
             task.is_enable = enable
 
         await self._send_timer_task_packet(self._discharging_task, modify)
+
+    async def _send_discharging_task_state(self, task_index: int, enabled: bool) -> bool:
+        """Rewrite the complete timer-task list with one discharge state changed."""
+        all_tasks = self._all_timer_tasks
+        if all_tasks is None:
+            return False
+
+        config = bk_series_pb2.ConfigWrite()
+        for task in all_tasks.time_task:
+            new_task = config.cfg_all_timer_task.time_task.add()
+            new_task.CopyFrom(task)
+            if task.task_index == task_index:
+                new_task.is_enable = enabled
+
+        await self._send_config_packet(config)
+        return True
+
+    @controls.button(
+        availability=dynamic(discharging_task_available),
+        translation_key="reinitialize_discharging",
+    )
+    async def reinitialize_discharging(self) -> None:
+        """Pulse the existing discharge task to recover a stuck device state."""
+        now = time.monotonic()
+        if now - self._last_discharge_reinitialize < self._DISCHARGE_REINITIALIZE_COOLDOWN:
+            self._logger.warning(
+                "Discharge reinitialization throttled; try again in %.0fs",
+                self._DISCHARGE_REINITIALIZE_COOLDOWN
+                - (now - self._last_discharge_reinitialize),
+            )
+            return
+
+        task = self._discharging_task
+        if task is None or self._all_timer_tasks is None:
+            self._logger.warning("Cannot reinitialize discharge: no timer task available")
+            return
+
+        self._last_discharge_reinitialize = now
+        was_enabled = task.is_enable
+        chain = self._get_chain()
+        async with chain.lock:
+            chain.pending_mods.clear()
+            self._logger.info(
+                "Reinitializing STREAM discharge task index=%s enabled=%s limit=%s",
+                task.task_index,
+                was_enabled,
+                task.home_need_power_limited,
+            )
+            if was_enabled:
+                await self._send_discharging_task_state(task.task_index, False)
+                await asyncio.sleep(1.0)
+                await self._send_discharging_task_state(task.task_index, True)
+
+            await self._enable_property_upload()
 
     @controls.power(
         discharging_power_limit,

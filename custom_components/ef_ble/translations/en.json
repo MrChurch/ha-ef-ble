@@ -304,6 +304,9 @@
       },
       "unpause_solar": {
         "name": "Unpause Solar"
+      },
+      "reinitialize_discharging": {
+        "name": "Reinitialize Discharging"
       }
     },
     "binary_sensor": {
